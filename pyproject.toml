@@ -1,0 +1,67 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mlflow-telegram"
+version = "0.1.0"
+description = "Watch MLflow training runs from Telegram: run cards, alerts, and zoomable charts in a Mini App."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "thenewgoat" }]
+keywords = ["mlflow", "telegram", "machine-learning", "monitoring", "training", "bot"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Monitoring",
+]
+# The Monitor needs only the standard library; everything else is an extra.
+dependencies = ["python-dotenv>=1.0"]
+
+[project.optional-dependencies]
+mlflow = ["mlflow-skinny>=2.10"]
+charts = ["matplotlib>=3.7", "numpy>=1.24"]
+system = ["psutil>=5.9", "nvidia-ml-py>=12"]
+bot = [
+    "python-telegram-bot[job-queue]>=21,<22",
+    "mlflow-skinny>=2.10",
+    "matplotlib>=3.7",
+    "numpy>=1.24",
+]
+all = ["mlflow-telegram[mlflow,charts,system,bot]"]
+# sqlalchemy + alembic: the tests use a temporary sqlite tracking store.
+dev = ["mlflow-telegram[all]", "sqlalchemy>=2", "alembic>=1.13", "pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+mlflow-telegram = "mlflow_telegram.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/thenewgoat/mlflow-telegram"
+Issues = "https://github.com/thenewgoat/mlflow-telegram/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mlflow_telegram"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "docs", "examples", "README.md", "CHANGELOG.md", "LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501", "B008", "B905", "E731", "UP007", "UP045"]

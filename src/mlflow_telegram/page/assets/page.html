@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Training Curves</title>
+<link rel="icon" href="data:,">
+<!--LIBS-->
+<style>
+  :root {
+    --bg: #fcfcfb; --bg-2: #f0efec; --ink: #0b0b0b; --ink-2: #52514e; --grid: #e4e3df;
+    --accent: #2a78d6; --on-accent: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #1a1a19; --bg-2: #2a2a28; --ink: #ffffff; --ink-2: #c3c2b7; --grid: #383835;
+      --accent: #3987e5;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #1a1a19; --bg-2: #2a2a28; --ink: #ffffff; --ink-2: #c3c2b7; --grid: #383835;
+    --accent: #3987e5;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  /* Telegram's own header or banner can sit over the top of the page on phones:
+     keep clear of it (Telegram's script sets these variables; env() is the browser's own). */
+  body { width: 100vw; overflow-x: hidden; padding-bottom: 16px;
+    padding-top: max(env(safe-area-inset-top, 0px),
+      calc(var(--tg-safe-area-inset-top, 0px) + var(--tg-content-safe-area-inset-top, 0px))); }
+  /* The readout: values under the finger, above the plot, never on it. */
+  /* In normal flow with a fixed height, so the chart below never jumps as values
+     come and go; long names are cut, many curves scroll inside it. */
+  #readout { margin: 6px 12px 0; padding: 6px 8px; height: 72px;
+    overflow-y: auto; overflow-x: hidden; background: var(--bg-2); border-radius: 10px;
+    font-size: 12px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px 12px;
+    align-content: start; }
+  #readout.wide { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  #readout .head { grid-column: 1 / -1; color: var(--ink-2); }
+  #readout .row-v { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  #readout .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: var(--ink-2); }
+  #readout .value { font-variant-numeric: tabular-nums; color: var(--ink); }
+  .dot { flex: none; display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+  .dash { flex: none; display: inline-block; }
+  #chart { height: 420px; width: 100%; touch-action: none; }   /* set from the viewport in JS */
+  #message { padding: 24px 16px; color: var(--ink-2); display: none; }
+  section { padding: 4px 12px 0; display: flex; flex-direction: column; gap: 8px; }
+  .row { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; align-items: center;
+    max-width: calc(100vw - 24px); }
+  .row::-webkit-scrollbar { display: none; }
+  .wrap { flex-wrap: wrap; overflow-x: visible; }
+  .label { flex: none; color: var(--ink-2); font-size: 12px; min-width: 52px; }
+  .chip { flex: none; border: 1px solid var(--grid); background: var(--bg-2); color: var(--ink);
+    border-radius: 999px; padding: 7px 12px; font-size: 13px; white-space: nowrap; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px; }
+  .chip.on { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+  select.chip { appearance: none; }
+  input[type=range] { flex: 1 1 auto; min-width: 80px; accent-color: var(--accent); }
+  .hint { color: var(--ink-2); font-size: 11px; }
+</style>
+</head>
+<body>
+<div id="readout"></div>
+<div id="message"></div>
+<div id="chart"></div>
+<section>
+  <div class="row" id="ranges"></div>
+  <div class="row wrap" id="runs"></div>
+  <div class="row wrap" id="keys"></div>
+  <div class="row">
+    <button class="chip" id="log">Log y</button>
+    <span class="label">Smooth</span>
+    <input type="range" id="smooth" min="0" max="0.99" step="0.01" value="0">
+    <span class="label" id="smooth-value">off</span>
+  </div>
+</section>
+<!--SOURCE-->
+<script>
+"use strict";
+// The chart, the same in the Mini App and the offline file: data comes only
+// through SOURCE (catalogue, series) and the opening runs and metrics from INITIAL.
+// Same palette and rules as the bot's PNGs: colour follows the run when runs are
+// overlaid (line style then tells metrics apart), else the metric; losses share
+// a panel, every other metric gets its own, all on one step axis.
+//
+// Gestures are our own, not ECharts' inside zoom: one finger only reads values
+// (the readout above the plot), two fingers zoom and pan the step axis, damped,
+// never below MIN_SPAN; double-tap resets. y always fits what is in view.
+const SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"];
+const DASHES = ["solid", "dashed", "dotted"];
+const MIN_SPAN = 3;          // percent of the step range
+const DAMPING = 0.6;         // pinch scale is raised to this power: less twitchy zoom
+const OPEN_AT = 15;          // the first view starts past the steep early descent
+const SHORT = { training_mean: "train", train_loss: "train", loss: "train", training: "train",
+  "eval/validation": "val", "eval/dev_loss": "val", learning_rate: "lr", lr: "lr",
+  seconds_per_step: "s/step", steps_per_s: "steps/s" };
+const state = {
+  runs: INITIAL.runs.slice(), keys: INITIAL.keys.slice(),
+  log: false, smooth: 0, catalogue: [], data: null, zoom: [OPEN_AT, 100], drawn: [],
+  extent: [0, 1], grid: { left: 0, width: 1 },
+};
+let chart;
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+function theme() {
+  if (!tg) return;
+  document.documentElement.dataset.theme = tg.colorScheme === "dark" ? "dark" : "light";
+  const p = tg.themeParams || {};
+  const root = document.documentElement.style;
+  if (p.bg_color) root.setProperty("--bg", p.bg_color);
+  if (p.secondary_bg_color) root.setProperty("--bg-2", p.secondary_bg_color);
+  if (p.text_color) root.setProperty("--ink", p.text_color);
+  if (p.hint_color) root.setProperty("--ink-2", p.hint_color);
+  if (p.button_color) root.setProperty("--accent", p.button_color);
+  if (p.button_text_color) root.setProperty("--on-accent", p.button_text_color);
+}
+
+function say(text) {
+  const box = document.getElementById("message");
+  box.textContent = text;
+  box.style.display = text ? "block" : "none";
+}
+
+function panelOf(key) {
+  const k = key.toLowerCase();
+  if (key.startsWith("eval/") && /(f1|acc|precision|recall)/.test(k)) return key;
+  if (key.startsWith("eval/") || /(loss|training|validation)/.test(k)) return "losses";
+  return key;
+}
+
+function shortKey(key) { return SHORT[key] || key.replace(/^(eval|system)\//, ""); }
+function shortRun(name) { return name.length > 12 ? name.slice(0, 11) + "…" : name; }
+function fmt(v) { return Number(v.toPrecision(4)).toString(); }
+
+function ema(points, weight) {
+  if (!weight) return points;
+  let last = 0;
+  return points.map(([s, v], i) => {
+    last = weight * last + (1 - weight) * v;
+    return [s, last / (1 - Math.pow(weight, i + 1))];
+  });
+}
+
+function runName(id) {
+  const run = state.catalogue.find(r => r.id === id);
+  return run ? run.name : id.slice(0, 8);
+}
+
+// -- range ---------------------------------------------------------------
+
+function bestStep() {
+  const run = state.data && state.data.runs[0];
+  const points = run && (run.series["eval/validation"] || run.series["eval/dev_loss"]);
+  if (!points || !points.length) return null;
+  return points.reduce((a, b) => (b[1] < a[1] ? b : a))[0];
+}
+
+function setZoom(start, end) {
+  const span = Math.max(MIN_SPAN, Math.min(100, end - start));
+  start = Math.max(0, Math.min(100 - span, start));
+  state.zoom = [start, start + span];
+  chart.dispatchAction({ type: "dataZoom", start: state.zoom[0], end: state.zoom[1] });
+  markRange();
+}
+
+function presets() {
+  const [x0, x1] = state.extent;
+  const best = bestStep();
+  const list = [["All", 0, 100], ["Last 50%", 50, 100], ["Last 20%", 80, 100]];
+  if (best !== null && x1 > x0) {
+    const at = ((best - x0) / (x1 - x0)) * 100;
+    list.push(["Since best", Math.max(0, at - 5), 100]);
+  }
+  return list;
+}
+
+function markRange() {
+  document.querySelectorAll("#ranges .chip").forEach(chip => {
+    chip.classList.toggle("on", Math.abs(+chip.dataset.start - state.zoom[0]) < 0.5 &&
+      Math.abs(+chip.dataset.end - state.zoom[1]) < 0.5);
+  });
+}
+
+function drawRanges() {
+  const box = document.getElementById("ranges");
+  box.innerHTML = "";
+  presets().forEach(([label, start, end]) => {
+    const chip = document.createElement("button");
+    chip.className = "chip";
+    chip.textContent = label;
+    chip.dataset.start = start;
+    chip.dataset.end = end;
+    chip.onclick = () => setZoom(start, end);
+    box.append(chip);
+  });
+  markRange();
+}
+
+// -- pickers -------------------------------------------------------------
+
+function drawPickers() {
+  const runs = document.getElementById("runs");
+  runs.innerHTML = "";
+  state.runs.forEach((id, i) => {
+    const chip = document.createElement("button");
+    chip.className = "chip";
+    chip.innerHTML = `<span class="dot" style="background:${SERIES[i % SERIES.length]}"></span>`;
+    chip.append(runName(id) + (state.runs.length > 1 ? " ✕" : ""));
+    chip.onclick = () => { if (state.runs.length > 1) { state.runs.splice(i, 1); load(); } };
+    runs.append(chip);
+  });
+  const others = state.catalogue.filter(r => !state.runs.includes(r.id));
+  if (others.length) {
+    const add = document.createElement("select");
+    add.className = "chip";
+    add.innerHTML = `<option value="">+ run</option>` + others
+      .map(r => `<option value="${escapeHtml(r.id)}">${escapeHtml(r.name)}</option>`).join("");
+    add.onchange = () => { if (add.value) { state.runs.push(add.value); load(); } };
+    runs.append(add);
+  }
+  const offered = [];
+  state.runs.forEach(id => (state.catalogue.find(r => r.id === id) || { keys: [] })
+    .keys.forEach(k => { if (!offered.includes(k)) offered.push(k); }));
+  const keys = document.getElementById("keys");
+  keys.innerHTML = "";
+  offered.forEach(key => {
+    const chip = document.createElement("button");
+    chip.className = "chip" + (state.keys.includes(key) ? " on" : "");
+    chip.textContent = key.replace(/^system\//, "");
+    chip.onclick = () => {
+      if (state.keys.includes(key)) { if (state.keys.length > 1) state.keys = state.keys.filter(k => k !== key); }
+      else state.keys.push(key);
+      load();
+    };
+    keys.append(chip);
+  });
+}
+
+// -- chart ---------------------------------------------------------------
+
+function draw() {
+  const data = state.data;
+  if (!data) return;
+  const overlay = data.runs.length > 1;
+  const panels = [];
+  state.keys.forEach(key => { const p = panelOf(key); if (!panels.includes(p)) panels.push(p); });
+  const shown = panels.slice(0, 3);
+  const ink = css("--ink"), ink2 = css("--ink-2"), grid = css("--grid"), accent = css("--accent");
+  const top = 22, gap = 30, bottom = 58;   // panel titles above, step labels and slider below
+  const height = chart.getHeight();
+  const each = (height - top - bottom - gap * (shown.length - 1)) / shown.length;
+  state.grid = { left: 52, width: chart.getWidth() - 52 - 12 };
+  const grids = shown.map((_, i) => ({ left: 52, right: 12, top: top + i * (each + gap), height: each }));
+  const xAxes = shown.map((_, i) => ({
+    type: "value", gridIndex: i, min: "dataMin", max: "dataMax",
+    axisLabel: { show: i === shown.length - 1, color: ink2, fontSize: 10, hideOverlap: true,
+      alignMinLabel: "left", alignMaxLabel: "right" },
+    axisLine: { lineStyle: { color: grid } }, splitLine: { lineStyle: { color: grid } }, axisTick: { show: false },
+    axisPointer: { show: true, type: "line", label: { show: false }, lineStyle: { color: ink2, width: 1 } },
+  }));
+  const yAxes = shown.map((name, i) => ({
+    type: state.log ? "log" : "value", gridIndex: i, scale: true, name: name === "losses" ? "losses" : shortKey(name),
+    nameLocation: "end", nameGap: 6,
+    nameTextStyle: { color: ink, fontWeight: "bold", align: "left", fontSize: 12 },
+    axisLabel: { color: ink2, fontSize: 10, formatter: v => fmt(v) },
+    splitLine: { lineStyle: { color: grid } }, axisLine: { show: false },
+    axisPointer: { show: false },
+  }));
+  const series = [];
+  state.drawn = [];
+  let x0 = Infinity, x1 = -Infinity;
+  data.runs.forEach((run, r) => {
+    state.keys.forEach((key, k) => {
+      const panel = shown.indexOf(panelOf(key));
+      const points = run.series[key];
+      if (panel < 0 || !points || !points.length) return;
+      x0 = Math.min(x0, points[0][0]);
+      x1 = Math.max(x1, points[points.length - 1][0]);
+      const color = SERIES[(overlay ? r : k) % SERIES.length];
+      const inPanel = state.keys.filter(o => panelOf(o) === panelOf(key)).indexOf(key);
+      const dash = overlay ? DASHES[inPanel % DASHES.length] : "solid";
+      const label = overlay ? `${shortRun(run.name)} ${shortKey(key)}` : shortKey(key);
+      const smooth = ema(points, state.smooth);
+      const common = { type: "line", xAxisIndex: panel, yAxisIndex: panel,
+        showSymbol: points.length <= 30, symbolSize: 5, color, sampling: "lttb" };
+      if (state.smooth) {
+        series.push({ ...common, name: label + " raw", data: points, silent: true, showSymbol: false,
+          lineStyle: { width: 1, opacity: 0.25, type: dash } });
+      }
+      series.push({ ...common, name: label, data: smooth, lineStyle: { width: 2, type: dash } });
+      state.drawn.push({ label, color, dash, points: smooth, panel });
+    });
+  });
+  state.extent = [x0, x1];
+  document.getElementById("readout").innerHTML = HINT;   // the old values belong to the old curves
+  document.getElementById("readout").classList.remove("wide");
+  chart.setOption({
+    backgroundColor: "transparent", animation: false,
+    grid: grids, xAxis: xAxes, yAxis: yAxes, series,
+    // The values go to the readout strip, not a floating box over the plot.
+    tooltip: { trigger: "axis", showContent: false, triggerOn: "mousemove|click" },
+    axisPointer: { link: [{ xAxisIndex: "all" }] },
+    dataZoom: [{ type: "slider", xAxisIndex: shown.map((_, i) => i), filterMode: "weakFilter",
+      start: state.zoom[0], end: state.zoom[1], minSpan: MIN_SPAN, bottom: 6, height: 30,
+      handleSize: "140%", brushSelect: false, borderColor: grid, fillerColor: accent + "26",
+      handleStyle: { color: accent, borderColor: accent },
+      moveHandleSize: 10, textStyle: { color: ink2, fontSize: 10 },
+      labelFormatter: v => Math.round(v).toLocaleString() }],
+  }, true);
+  drawRanges();
+}
+
+const HINT = '<span class="head">Touch the chart to read values · pinch to zoom · double-tap to reset</span>';
+
+// The chart's height from Telegram's stable viewport (not 100vh, which counts the
+// area under Telegram's header and keyboard), less the safe areas.
+function layout() {
+  const root = getComputedStyle(document.documentElement);
+  const inset = name => parseFloat(root.getPropertyValue(name)) || 0;
+  const viewport = (tg && tg.viewportStableHeight) || window.innerHeight;
+  const usable = viewport - inset("--tg-safe-area-inset-top") - inset("--tg-content-safe-area-inset-top")
+    - inset("--tg-safe-area-inset-bottom") - inset("--tg-content-safe-area-inset-bottom");
+  const height = Math.round(Math.max(280, Math.min(usable - 90, usable * 0.6)));
+  const box = document.getElementById("chart");
+  if (box.style.height !== height + "px") {
+    box.style.height = height + "px";
+    if (chart) { chart.resize(); draw(); }
+  }
+}
+
+function nearest(points, x) {
+  let lo = 0, hi = points.length - 1;
+  while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (points[mid][0] < x) lo = mid; else hi = mid; }
+  return Math.abs(points[lo][0] - x) <= Math.abs(points[hi][0] - x) ? points[lo] : points[hi];
+}
+
+function readout(x) {
+  const box = document.getElementById("readout");
+  if (x === null || !state.drawn.length) return;
+  const rows = state.drawn.map(s => {
+    const [step, value] = nearest(s.points, x);
+    const mark = s.dash === "solid" ? `<span class="dot" style="background:${s.color}"></span>`
+      : `<svg class="dash" width="14" height="4"><line x1="0" y1="2" x2="14" y2="2" stroke="${s.color}" ` +
+        `stroke-width="2" stroke-dasharray="${s.dash === "dashed" ? "4 2" : "1.5 2"}"/></svg>`;
+    return `<div class="row-v">${mark}<span class="name">${escapeHtml(s.label)}</span>` +
+      `<span class="value">${fmt(value)}</span></div>`;
+  });
+  box.classList.toggle("wide", rows.length > 3);
+  box.innerHTML = `<span class="head">step ${Math.round(x).toLocaleString()}</span>` + rows.join("");
+}
+
+// -- gestures ------------------------------------------------------------
+
+function gestures(dom) {
+  let pinch = null, lastTap = 0;
+  const xOf = touch => touch.clientX - dom.getBoundingClientRect().left;
+  dom.addEventListener("touchstart", e => {
+    if (e.touches.length === 2) {
+      const [a, b] = [xOf(e.touches[0]), xOf(e.touches[1])];
+      pinch = { distance: Math.max(30, Math.abs(a - b)), middle: (a + b) / 2, zoom: state.zoom.slice() };
+      e.preventDefault(); e.stopPropagation();
+    } else if (e.touches.length === 1) {
+      const now = Date.now();
+      if (now - lastTap < 300) { setZoom(0, 100); lastTap = 0; } else lastTap = now;
+    }
+  }, { capture: true, passive: false });
+  dom.addEventListener("touchmove", e => {
+    if (!pinch || e.touches.length !== 2) return;
+    e.preventDefault(); e.stopPropagation();
+    const [a, b] = [xOf(e.touches[0]), xOf(e.touches[1])];
+    const distance = Math.max(30, Math.abs(a - b)), middle = (a + b) / 2;
+    const [s0, e0] = pinch.zoom, span0 = e0 - s0;
+    const span = span0 * Math.pow(pinch.distance / distance, DAMPING);
+    const { left, width } = state.grid;
+    const focus = s0 + ((pinch.middle - left) / width) * span0;          // percent under the fingers
+    const start = focus - ((middle - left) / width) * span;              // keep it under them (pan too)
+    setZoom(start, start + span);
+  }, { capture: true, passive: false });
+  dom.addEventListener("touchend", e => { if (e.touches.length < 2) pinch = null; }, { capture: true });
+  dom.addEventListener("wheel", e => {                                   // desktop: damped wheel zoom
+    e.preventDefault();
+    const [s0, e0] = state.zoom, span0 = e0 - s0;
+    const span = span0 * Math.pow(1.0015, e.deltaY);
+    const { left, width } = state.grid;
+    const focus = s0 + ((e.offsetX - left) / width) * span0;
+    setZoom(focus - ((e.offsetX - left) / width) * span, focus - ((e.offsetX - left) / width) * span + span);
+  }, { passive: false });
+  dom.addEventListener("dblclick", () => setZoom(0, 100));
+}
+
+// -- start ---------------------------------------------------------------
+
+async function load() {
+  drawPickers();
+  try {
+    state.data = await SOURCE.series(state.runs, state.keys);
+    say("");
+    draw();
+  } catch (error) { say(error.message); }
+}
+
+async function main() {
+  theme();
+  if (tg) {
+    tg.ready(); tg.expand();
+    if (tg.disableVerticalSwipes) tg.disableVerticalSwipes();   // drags on the chart must not close us
+  }
+  document.getElementById("readout").innerHTML = HINT;
+  layout();
+  if (tg && tg.onEvent) {
+    ["viewportChanged", "safeAreaChanged", "contentSafeAreaChanged"].forEach(name => tg.onEvent(name, layout));
+  }
+  chart = echarts.init(document.getElementById("chart"), null, { renderer: "canvas" });
+  gestures(document.getElementById("chart"));
+  chart.on("updateAxisPointer", event => {
+    const info = (event.axesInfo || []).find(a => a.axisDim === "x");
+    if (info) readout(info.value);
+  });
+  chart.on("dataZoom", () => {
+    const option = chart.getOption().dataZoom[0];
+    state.zoom = [option.start, option.end];
+    markRange();
+  });
+  window.addEventListener("resize", () => { layout(); chart.resize(); draw(); });
+  document.getElementById("log").onclick = e => {
+    state.log = !state.log; e.target.classList.toggle("on", state.log); draw();
+  };
+  const smooth = document.getElementById("smooth");
+  smooth.oninput = () => {
+    state.smooth = Number(smooth.value);
+    document.getElementById("smooth-value").textContent = state.smooth ? state.smooth.toFixed(2) : "off";
+    draw();
+  };
+  try {
+    state.catalogue = await SOURCE.catalogue();
+  } catch (error) { say(error.message); return; }
+  if (!state.runs.length) state.runs = INITIAL.runs.slice();
+  if (!state.keys.length) state.keys = INITIAL.keys.slice();
+  if (!state.runs.length && state.catalogue.length) state.runs = [state.catalogue[0].id];
+  if (!state.keys.length) {
+    const run = state.catalogue.find(r => r.id === state.runs[0]);
+    const keys = run ? run.keys : [];
+    state.keys = keys.filter(k => /^(training_mean|train_loss|loss|training)$/.test(k)).slice(0, 1)
+      .concat(keys.filter(k => k === "eval/validation"));
+    if (!state.keys.length) state.keys = keys.slice(0, 1);
+  }
+  drawPickers();
+  try {
+    state.data = await SOURCE.series(state.runs, state.keys);
+    chart.resize();
+    draw();
+    document.body.dataset.ready = String(state.data.runs.length);   // for tests
+  } catch (error) { say(error.message); }
+}
+main();
+</script>
+</body>
+</html>
