@@ -16,6 +16,7 @@ import statistics
 import time
 from dataclasses import dataclass, field
 
+from mlflow_telegram.redact import redact_params
 from mlflow_telegram.sources import Point, RunInfo, RunSource
 
 __all__ = ["RunView", "view", "live", "recent", "system_history", "parse_command",
@@ -57,12 +58,13 @@ def parse_command(command: str) -> dict:
 
 
 def all_params(run: RunInfo) -> dict:
-    """The run's params, with the arguments of a logged `command` filled in under them."""
+    """The run's params, with the arguments of a logged `command` filled in under
+    them, and anything secret-looking masked (`mlflow_telegram.redact`)."""
     params = dict(run.params)
     if "command" in params:
         for key, value in parse_command(params["command"]).items():
             params.setdefault(key, value)
-    return params
+    return redact_params(params)
 
 
 def _integer(value) -> int | None:

@@ -55,6 +55,7 @@ import traceback
 from mlflow_telegram import state as bot_state
 from mlflow_telegram.config import Config, load_env_file  # noqa: F401 (re-exported)
 from mlflow_telegram.notify import Telegram
+from mlflow_telegram.redact import redact_params, redact_text
 
 __all__ = ["Monitor", "Formatter", "Telegram", "load_env_file"]
 
@@ -128,8 +129,8 @@ class Formatter:
 
     def crashed(self, title: str, where: str, elapsed: str, error: BaseException,
                 trace: str) -> str:
-        return (f"💥 {title} crashed{where} after {elapsed}: "
-                f"{type(error).__name__}: {error}\n\n{trace[-1500:]}")
+        text = f"💥 {title} crashed{where} after {elapsed}: {type(error).__name__}: {error}"
+        return text + (f"\n\n{trace[-1500:]}" if trace else "")
 
 
 class Monitor:
@@ -147,10 +148,14 @@ class Monitor:
                  environ=None, *, config: dict | None = None, out: str | None = None,
                  max_steps: int | None = None, patience: int | None = None,
                  artifact: str | None = None, system_metrics: bool = True,
-                 charts: bool = True, formatter: Formatter | None = None):
+                 charts: bool = True, formatter: Formatter | None = None,
+                 send_traceback: bool = True, redact: bool = True):
         real = environ is None
         settings = Config.from_env(None if real else environ)
         self.formatter = formatter or Formatter()
+        self.send_traceback = send_traceback
+        self.redact = redact
+        self._secrets = [settings.token] if settings.token else []
         self.script = script
         self.name = name or time.strftime("%Y%m%d-%H%M%S")
         self.params = {**(config or {}), **(params or {})}
@@ -191,7 +196,10 @@ class Monitor:
 
         self.telegram = None
         if settings.telegram_ready:
-            self.telegram = Telegram(settings.token, str(settings.chat_id))
+            try:
+                self.telegram = Telegram(settings.token, str(settings.chat_id))
+            except ValueError as error:
+                self._warn("telegram is off", error)
 
     @property
     def enabled(self) -> bool:
@@ -210,6 +218,8 @@ class Monitor:
                 params = {key: (value if isinstance(value, (int, float, str, bool))
                                 else json.dumps(value, default=str))
                           for key, value in self.params.items() if value is not None}
+                if self.redact:   # secret-looking keys and --api-key style flags
+                    params = redact_params(params)
                 # MLflow caps a param value's length.
                 self.mlflow.log_params({key: str(value)[:6000] for key, value in params.items()})
                 tags = {"monitor.pid": os.getpid(), "monitor.host": self.host,
@@ -283,7 +293,7 @@ class Monitor:
         interrupted = isinstance(error, KeyboardInterrupt)
         if self.mlflow is not None:
             try:
-                self.mlflow.set_tag("error", f"{type(error).__name__}: {error}"[:5000])
+                self.mlflow.set_tag("error", self._clean(f"{type(error).__name__}: {error}")[:5000])
                 self._attach()
                 self.mlflow.end_run(status="KILLED" if interrupted else "FAILED")
             except Exception as problem:  # noqa: BLE001
@@ -292,8 +302,10 @@ class Monitor:
         if interrupted:
             self._say(self.formatter.interrupted(self._title(), where, self._elapsed()))
         else:
-            tail = "".join(traceback.format_exception(type(error), error, error.__traceback__))
-            self._say(self.formatter.crashed(self._title(), where, self._elapsed(), error, tail))
+            tail = ("".join(traceback.format_exception(type(error), error, error.__traceback__))
+                    if self.send_traceback else "")
+            self._say(self._clean(self.formatter.crashed(self._title(), where, self._elapsed(),
+                                                         error, tail)))
         self._close()
 
     def __enter__(self) -> Monitor:
@@ -387,6 +399,12 @@ class Monitor:
         if self.telegram is not None:
             self.telegram.close()
 
-    @staticmethod
-    def _warn(what: str, error: BaseException) -> None:
-        print(f"[mlflow-telegram] {what}: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
+    def _clean(self, text: str) -> str:
+        """`text` without the bot token, URL credentials, secret query values or
+        the home directory (when `redact`)."""
+        return redact_text(text, self._secrets) if self.redact else text
+
+    def _warn(self, what: str, error: BaseException) -> None:
+        secrets = getattr(self, "_secrets", [])
+        print(f"[mlflow-telegram] {what}: {type(error).__name__}: "
+              f"{redact_text(str(error), secrets, home=False)}", file=sys.stderr, flush=True)

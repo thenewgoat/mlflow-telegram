@@ -21,6 +21,8 @@ Setting                         Variables (first one set wins)              Defa
 ``every_minutes``               MLFLOW_TELEGRAM_EVERY_MINUTES,              30
                                 TELEGRAM_EVERY_MINUTES
 ``experiment``                  MLFLOW_EXPERIMENT_NAME                      (script)
+``allowed_users``               MLFLOW_TELEGRAM_ALLOWED_USERS               (anyone in
+                                (comma-separated user ids)                  the chat)
 ==============================  ==========================================  =========
 
 The state file (mute, push interval, alerts sent, chart states) defaults to
@@ -37,7 +39,11 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-__all__ = ["Config", "load_env_file", "default_state_path", "setting"]
+__all__ = ["Config", "load_env_file", "default_state_path", "setting", "TOKEN_SHAPE"]
+
+import re
+
+TOKEN_SHAPE = re.compile(r"^\d+:[A-Za-z0-9_-]{30,}$")
 
 PREFIX = "MLFLOW_TELEGRAM_"
 
@@ -45,7 +51,8 @@ PREFIX = "MLFLOW_TELEGRAM_"
 def setting(environ: Mapping[str, str], *names: str, default: str = "") -> str:
     """The first of `names` set (non-empty) in `environ`, else `default`."""
     for name in names:
-        value = environ.get(name, "")
+        # Stripped: a .env with Windows line endings leaves a trailing "\r".
+        value = (environ.get(name) or "").strip()
         if value:
             return value
     return default
@@ -99,6 +106,7 @@ class Config:
     disk_gb: float = 20.0
     every_minutes: float = 30.0
     experiment: str = ""
+    allowed_users: tuple[int, ...] = ()
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None,
@@ -121,8 +129,16 @@ class Config:
             every_minutes=_number(setting(environ, PREFIX + "EVERY_MINUTES",
                                           "TELEGRAM_EVERY_MINUTES"), 30.0),
             experiment=environ.get("MLFLOW_EXPERIMENT_NAME", ""),
+            allowed_users=tuple(int(part) for part in re.split(r"[,\s]+", setting(
+                environ, PREFIX + "ALLOWED_USERS")) if part.lstrip("-").isdigit()),
         )
 
     @property
     def telegram_ready(self) -> bool:
         return bool(self.token and self.chat_id is not None)
+
+    @property
+    def token_looks_valid(self) -> bool:
+        """Whether the token has Telegram's shape (digits, colon, 30+ URL-safe
+        characters); anything else would put odd characters into request URLs."""
+        return bool(TOKEN_SHAPE.match(self.token))

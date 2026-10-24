@@ -5,13 +5,36 @@ axis, a legend whenever it has two or more series, the dataviz reference
 palette in its fixed order, 2px lines and recessive grid and axes.
 """
 
+import functools
 import io
 import math
 
 import matplotlib
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
 
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
+__all__ = ["run_panels", "compare", "system", "explore", "ema", "panel_of", "visible_range",
+           "robust_limits"]
+
+# Figures are made without pyplot, so drawing here never switches the backend or
+# touches figures of the process it runs in (a training script, say).
+_STYLE = {"text.parse_math": False,    # "$" in a run name is a dollar sign, not maths
+          "font.size": 11}
+
+
+def _subplots(rows: int = 1, cols: int = 1, **options):
+    figure = Figure(figsize=options.pop("figsize", (7, 3.6)))
+    FigureCanvasAgg(figure)
+    axes = figure.subplots(rows, cols, **options)
+    return figure, axes
+
+
+def _isolated(draw):
+    @functools.wraps(draw)
+    def wrapper(*args, **kwargs):
+        with matplotlib.rc_context(_STYLE):
+            return draw(*args, **kwargs)
+    return wrapper
 
 SURFACE = "#fcfcfb"
 INK = "#0b0b0b"
@@ -65,7 +88,6 @@ def _plot(ax, label: str, points, color: str, show_best: bool = False,
 def _png(figure, dpi: int = 140) -> bytes:
     buffer = io.BytesIO()
     figure.savefig(buffer, format="png", dpi=dpi, facecolor=SURFACE, bbox_inches="tight")
-    plt.close(figure)
     return buffer.getvalue()
 
 
@@ -85,12 +107,13 @@ def _panels(series: dict) -> list[tuple[str, dict]]:
     return panels[:4]
 
 
+@_isolated
 def run_panels(series: dict, title: str) -> bytes | None:
     """One run's curves: `series` maps metric key to [(step, value), ...]."""
     panels = _panels(series)
     if not panels:
         return None
-    figure, axes = plt.subplots(len(panels), 1, figsize=(7, 2.6 * len(panels) + 0.4),
+    figure, axes = _subplots(len(panels), 1, figsize=(7, 2.6 * len(panels) + 0.4),
                                 squeeze=False)
     figure.patch.set_facecolor(SURFACE)
     figure.suptitle(title, x=0.01, ha="left", fontsize=12, color=INK)
@@ -109,6 +132,7 @@ def run_panels(series: dict, title: str) -> bytes | None:
     return _png(figure)
 
 
+@_isolated
 def compare(runs: dict, metric: str, title: str = "") -> bytes | None:
     """Several runs' `metric` overlaid: `runs` maps run label to [(step, value), ...].
 
@@ -116,7 +140,7 @@ def compare(runs: dict, metric: str, title: str = "") -> bytes | None:
     runs = {label: points for label, points in runs.items() if points}
     if not runs:
         return None
-    figure, ax = plt.subplots(figsize=(7, 3.6))
+    figure, ax = _subplots(figsize=(7, 3.6))
     figure.patch.set_facecolor(SURFACE)
     _axes(ax, title or metric)
     values = []
@@ -133,6 +157,7 @@ def compare(runs: dict, metric: str, title: str = "") -> bytes | None:
     return _png(figure)
 
 
+@_isolated
 def system(series: dict, title: str) -> bytes | None:
     """System metrics against minutes since the first sample: utilisation
     percentages in one panel, GPU memory in another."""
@@ -144,7 +169,7 @@ def system(series: dict, title: str) -> bytes | None:
     if not panels:
         return None
     start = min(points[0][0] for _, group in panels for points in group.values())
-    figure, axes = plt.subplots(len(panels), 1, figsize=(7, 2.6 * len(panels) + 0.4),
+    figure, axes = _subplots(len(panels), 1, figsize=(7, 2.6 * len(panels) + 0.4),
                                 squeeze=False)
     figure.patch.set_facecolor(SURFACE)
     figure.suptitle(title, x=0.01, ha="left", fontsize=12, color=INK)
@@ -245,6 +270,7 @@ def robust_limits(values_by_step: list[tuple[float, float]], x0: float, x1: floa
     return float(low), float(high), clipped
 
 
+@_isolated
 def explore(runs: list[tuple[str, dict]], keys: list[str], mode: str = "all",
             log: bool = False, smooth: float = 0.0, best_step: int | None = None,
             title: str = "", dpi: int = 140) -> bytes | None:
@@ -264,8 +290,7 @@ def explore(runs: list[tuple[str, dict]], keys: list[str], mode: str = "all",
     steps = [s for _, series in runs for k in keys for s, _ in series.get(k, [])]
     x0, x1 = visible_range(steps, mode, best_step)
     overlay = len(runs) > 1
-    plt.rcParams.update({"font.size": 11})
-    figure, axes = plt.subplots(len(names), 1, figsize=(7.2, 1.0 + 3.0 * len(names)),
+    figure, axes = _subplots(len(names), 1, figsize=(7.2, 1.0 + 3.0 * len(names)),
                                 squeeze=False, sharex=True)
     figure.patch.set_facecolor(SURFACE)
     if title:

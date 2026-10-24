@@ -41,9 +41,16 @@ but one static page.
   [docs/payload.md](docs/payload.md).
 - **Nothing listens on your machine.** The bot uses outbound long polling.
   There's no webhook and no tunnel.
-- **The bot answers only your chat id** and ignores everyone else. Its only
-  writes to MLflow are a run's status (a "Mark killed" button, after a check
-  that the process is gone) and its note.
+- **The bot answers only your chat id** and ignores everyone else. It leaves any
+  other group it is added to. Its only writes to MLflow are a run's status (a
+  "Mark killed" button, after a check that the process is gone) and its note.
+  Use a **private** chat with the bot: in a group, every member could use it,
+  unless you limit it with `MLFLOW_TELEGRAM_ALLOWED_USERS`.
+- **Secrets stay out of messages.** Params whose names look secret (`token`,
+  `api_key`, `password`, ...) and secret-looking flags inside a logged command
+  line are masked before they are logged or shown. The bot token is masked in
+  logs and errors. Error messages in the chat say only what kind of error it
+  was. See [SECURITY.md](SECURITY.md).
 
 ## Install
 
@@ -169,6 +176,7 @@ run_bot(commands=DEFAULT_COMMANDS + [Command("ping", "check the bot is alive", p
 | `MLFLOW_TELEGRAM_DISK_GB` | `TRAINBOT_DISK_GB` | 20 | low-disk threshold |
 | `MLFLOW_TELEGRAM_EVERY_MINUTES` | `TELEGRAM_EVERY_MINUTES` | 30 | Monitor's progress-push interval |
 | `MLFLOW_TELEGRAM_ENV_FILE` | `MONITOR_ENV_FILE` | `./.env` | the `.env` to load |
+| `MLFLOW_TELEGRAM_ALLOWED_USERS` | | (anyone in the chat) | comma-separated Telegram user ids allowed to use the bot |
 
 `mlflow-telegram config` shows what is in effect (the token hidden).
 

@@ -15,6 +15,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import ExtBot
 
 from mlflow_telegram.notify import CAPTION_LIMIT, TEXT_LIMIT, fit
+from mlflow_telegram.redact import redact_text
 from mlflow_telegram.runs import RunView, bar, duration, number
 
 __all__ = ["esc", "fit", "FittingBot", "parse_duration", "health", "progress_line", "runs_line",
@@ -129,9 +130,9 @@ def card(view: RunView, now: float) -> str:
     if system:
         lines.append("system: " + system)
     if view.tags.get("best_checkpoint"):
-        lines.append(f"checkpoint <code>{esc(view.tags['best_checkpoint'])}</code>")
+        lines.append(f"checkpoint <code>{esc(redact_text(view.tags['best_checkpoint']))}</code>")
     if view.tags.get("error"):
-        lines.append(f"error: <code>{esc(view.tags['error'][:300])}</code>")
+        lines.append(f"error: <code>{esc(redact_text(view.tags['error'])[:300])}</code>")
     note = view.tags.get("mlflow.note.content")
     if note:
         lines.append(f"📝 {esc(note[:500])}")

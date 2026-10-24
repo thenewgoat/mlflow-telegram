@@ -41,7 +41,7 @@ def dead(view: RunView, hours: float, now: float) -> bool:
 def mark(source: RunSource, views: list[RunView], path: str | None = None) -> list[dict]:
     """Marks `views` KILLED, appending one line per run to the record first."""
     path = path or record_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    os.makedirs(os.path.dirname(path) or ".", mode=0o700, exist_ok=True)
     done = []
     for view in views:
         run = source.get_run(view.id)
@@ -50,7 +50,7 @@ def mark(source: RunSource, views: list[RunView], path: str | None = None) -> li
         entry = {"run_id": view.id, "run_name": view.name, "experiment": view.experiment,
                  "old_status": run.status, "old_end_time": run.end_time,
                  "marked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
-        with open(path, "a") as handle:
+        with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "a") as handle:
             handle.write(json.dumps(entry) + "\n")
         source.mark_killed(view.id)
         done.append(entry)

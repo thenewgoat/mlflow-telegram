@@ -16,3 +16,8 @@ First public version.
   log scale, smoothing, readout strip; Telegram safe areas respected.
 - `RunSource` protocol with `MlflowSource`.
 - CLI: `bot`, `build-page`, `probe`, `cleanup`, `config`.
+- Security (see SECURITY.md, SECURITY-AUDIT.md):
+  - secrets masked in params and errors, and the bot token masked in logs;
+  - optional user allow-list; the bot leaves foreign groups;
+  - the page runs under a CSP and caps what a hand-made link can make it decode;
+  - owner-only state files; SHA-pinned CI actions.

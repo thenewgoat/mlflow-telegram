@@ -89,10 +89,13 @@ def test_echarts_cache_rejects_a_wrong_hash(tmp_path):
 def test_build_page_writes_the_site_without_data(tmp_path):
     from mlflow_telegram import page
     names = page.build_page(str(tmp_path), echarts="window.echarts = {};")
-    assert names == sorted([".nojekyll", page.ECHARTS_FILE, "index.html", "robots.txt"])
+    assert names == sorted([".nojekyll", "app.js", "boot.js", page.ECHARTS_FILE, "index.html",
+                            "robots.txt"])
     html = (tmp_path / "index.html").read_text()
-    assert "fetch(" not in html and "EMBEDDED" not in html and page.ECHARTS_FILE in html
-    assert html.index("__FRAGMENT") < html.index("telegram-web-app.js")
+    app = (tmp_path / "app.js").read_text()
+    assert "fetch(" not in html + app and "XMLHttpRequest" not in app and "eval(" not in app
+    assert html.index("boot.js") < html.index("telegram-web-app.js") < html.index("app.js")
+    assert "__FRAGMENT" in (tmp_path / "boot.js").read_text()
 
 
 def test_album_resolution_png():

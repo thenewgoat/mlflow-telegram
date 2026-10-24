@@ -30,6 +30,7 @@ that opens the interactive Mini App with the curves packed into its link.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -49,6 +50,7 @@ from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
+    ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -81,6 +83,7 @@ from mlflow_telegram.bot.format import (
     system_summary,
 )
 from mlflow_telegram.config import Config
+from mlflow_telegram.redact import redact_text
 from mlflow_telegram.runs import RunView, duration, higher_is_better, number
 from mlflow_telegram.sources import RunSource
 
@@ -93,6 +96,30 @@ LINK_SIBLINGS = 5     # recent runs of the experiment offered as overlays in the
 SIBLING_POINTS = 200  # points per curve for those
 ALBUM_DPI = 300       # ~2,100 px wide: Telegram's viewer keeps up to 2,560
 DIGEST_OVER = 3       # more new alerts than this in one minute go out as one message
+
+#: The update types the bot asks Telegram for; nothing else reaches it.
+ALLOWED_UPDATES = [Update.MESSAGE, Update.CALLBACK_QUERY, Update.MY_CHAT_MEMBER]
+
+
+def short_key(key: str) -> str:
+    """A fixed-length stand-in for an alert key inside callback data (64 bytes max)."""
+    return hashlib.sha1(key.encode()).hexdigest()[:16]
+
+
+class RedactToken(logging.Filter):
+    """Masks the bot token in log records (httpx logs request URLs, which carry it)."""
+
+    def __init__(self, token: str):
+        super().__init__()
+        self.token = token
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if self.token:
+            message = record.getMessage()
+            if self.token in message:
+                record.msg, record.args = message.replace(self.token, "***"), None
+        return True
+
 
 Handler = Callable[["TrainBot", Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
 
@@ -555,18 +582,30 @@ class TrainBot:
             "(runs started with this monitor pick it up at once).")
 
     async def text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """A reply to the 📝 Note prompt."""
-        run_id = context.chat_data.pop("pending_note", None)
-        if run_id is None:
+        """A reply to the 📝 Note prompt: only from the person who asked for it, and
+        only as a reply to that prompt."""
+        message = update.effective_message
+        pending = context.user_data.get("pending_note")
+        reply = message.reply_to_message
+        if not pending or reply is None or reply.message_id != pending["prompt"]:
             return
-        await asyncio.to_thread(self.source.set_note, run_id, update.effective_message.text)
-        await update.effective_message.reply_text("📝 Noted.")
+        context.user_data.pop("pending_note", None)
+        await asyncio.to_thread(self.source.set_note, pending["run"], message.text)
+        await message.reply_text("📝 Noted.")
+
+    def allowed(self, update: Update) -> bool:
+        """The configured chat, and (when `allowed_users` is set) one of those users."""
+        chat, user = update.effective_chat, update.effective_user
+        if chat is None or chat.id != self.chat_id:
+            return False
+        users = self.config.allowed_users
+        return not users or (user is not None and user.id in users)
 
     # buttons
 
     async def button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
-        if update.effective_chat is None or update.effective_chat.id != self.chat_id:
+        if not self.allowed(update):
             await query.answer()
             return
         action, _, rest = query.data.partition(":")
@@ -578,14 +617,14 @@ class TrainBot:
             return
         if action == "ign":
             value = self.state()
-            value["ignored"] = sorted(set(value.get("ignored", [])) | {rest})
+            value["ignored"] = sorted(set(value.get("ignored", [])) | {rest[:16]})
             self.save(value)
             await query.edit_message_reply_markup(None)
             return
         if action == "ignall":
             value = self.state()
             value["ignored"] = sorted(set(value.get("ignored", []))
-                                      | set(value.pop("digest_keys", [])))
+                                      | {short_key(k) for k in value.pop("digest_keys", [])})
             self.save(value)
             await query.edit_message_reply_markup(None)
             return
@@ -598,7 +637,7 @@ class TrainBot:
         elif action == "params":
             view = (await self.views([run]))[0]
             pages = params_pages(view)
-            page = min(int(other or 0), len(pages) - 1)
+            page = min(int(other) if other.isdigit() else 0, len(pages) - 1)
             markup = params_keyboard(run_id, page, len(pages))
             if other:   # a page button: turn the page in place
                 try:
@@ -648,10 +687,10 @@ class TrainBot:
                     update, png, f"<b>{esc(run.name)}</b> · "
                     + system_summary(run.metrics), nav_keyboard(run_id))
         elif action == "note":
-            context.chat_data["pending_note"] = run_id
-            await update.effective_message.reply_text(
-                f"Reply with the note for {run.name}:",
+            prompt = await update.effective_message.reply_text(
+                f"Reply to this message with the note for {run.name}:",
                 reply_markup=ForceReply(selective=True))
+            context.user_data["pending_note"] = {"run": run_id, "prompt": prompt.message_id}
         elif action == "kill":
             await update.effective_message.reply_text(
                 f"Mark {run.name} KILLED in MLflow? This only changes the record; "
@@ -689,22 +728,26 @@ class TrainBot:
         muted = bot_state.muted(value, now)
         active = {alert.key for alert in found}
         alerted = set(value.get("alerted", [])) & active
-        ignored = set(value.get("ignored", [])) & active
+        ignored = set(value.get("ignored", [])) & {short_key(key) for key in active}
         fresh = [alert for alert in found
-                 if not (alert.key in alerted or alert.key in ignored or muted)]
+                 if not (alert.key in alerted or short_key(alert.key) in ignored or muted)]
         if len(fresh) > DIGEST_OVER:
             await self.digest(context, fresh)
             alerted |= {alert.key for alert in fresh}
             fresh = []
         for alert in fresh:
-            buttons = [InlineKeyboardButton("🙈 Ignore", callback_data=f"ign:{alert.key}")]
+            buttons = [InlineKeyboardButton("🙈 Ignore",
+                                            callback_data=f"ign:{short_key(alert.key)}")]
             if alert.run_id:
                 buttons.insert(0, InlineKeyboardButton("Open", callback_data=f"card:{alert.run_id}"))
             if alert.can_kill:
                 buttons.insert(0, InlineKeyboardButton("🪦 Mark killed",
                                                        callback_data=f"kill:{alert.run_id}"))
-            await context.bot.send_message(self.chat_id, alert.text,
-                                           reply_markup=InlineKeyboardMarkup([buttons]))
+            try:
+                await context.bot.send_message(self.chat_id, alert.text,
+                                               reply_markup=InlineKeyboardMarkup([buttons]))
+            except BadRequest as error:   # one bad alert must not stall the watcher
+                log.warning("alert %s not sent: %s", alert.key, error)
             alerted.add(alert.key)
         status_id = await self.pin_status(
             context, status_text(views, gpu, disk_text(self.disk_path), now,
@@ -727,7 +770,7 @@ class TrainBot:
         value["digest_keys"] = [a.key for a in fresh]
         self.save(value)
         await context.bot.send_message(
-            self.chat_id, "\n".join(lines)[:4000], parse_mode=ParseMode.HTML,
+            self.chat_id, "\n".join(lines), parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🙈 Ignore all", callback_data="ignall:")]]))
 
@@ -765,28 +808,58 @@ class TrainBot:
                     "rest. Alerts and a pinned status follow from here.",
                     disable_notification=True)
 
+        redactor = RedactToken(self.config.token)
+        for name in ("httpx", "httpcore", "telegram", "mlflow_telegram"):
+            logger = logging.getLogger(name)
+            if not any(isinstance(f, RedactToken) for f in logger.filters):
+                logger.addFilter(redactor)
+        logging.getLogger("httpx").setLevel(logging.WARNING)   # its URLs carry the token
+        if self.chat_id < 0 and not self.config.allowed_users:
+            log.warning("the bot answers a group: every member can use it; set "
+                        "MLFLOW_TELEGRAM_ALLOWED_USERS to limit it to some users")
         app = (Application.builder().bot(FittingBot(self.config.token))
                .post_init(post_init).build())
         only = filters.Chat(chat_id=self.chat_id)
+        if self.config.allowed_users:
+            only = only & filters.User(user_id=list(self.config.allowed_users))
         for command in self.commands:
             async def answer(update, context, command=command):
                 await command.handler(self, update, context)
             app.add_handler(CommandHandler(command.name, answer, filters=only))
         app.add_handler(CommandHandler("start", self.help, filters=only))
         app.add_handler(CallbackQueryHandler(self.button))
-        app.add_handler(MessageHandler(only & filters.TEXT & ~filters.COMMAND, self.text))
+        app.add_handler(MessageHandler(only & filters.TEXT & filters.REPLY & ~filters.COMMAND,
+                                       self.text))
+        app.add_handler(ChatMemberHandler(self.joined, ChatMemberHandler.MY_CHAT_MEMBER))
         app.add_error_handler(self.error)
         if watch_interval:
             app.job_queue.run_repeating(self.watch, interval=watch_interval, first=5,
                                         name="watch")
         return app
 
+    async def joined(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Leaves any group or channel it is added to other than the configured chat."""
+        change = update.my_chat_member
+        if change is None or change.chat.id == self.chat_id:
+            return
+        if change.new_chat_member.status in ("member", "administrator"):
+            log.warning("added to chat %s, which is not the configured chat: leaving",
+                        change.chat.id)
+            try:
+                await context.bot.leave_chat(change.chat.id)
+            except Exception as error:  # noqa: BLE001
+                log.warning("could not leave chat %s: %s", change.chat.id, error)
+
     async def error(self, update: object, context: ContextTypes.DEFAULT_TYPE):
-        log.error("handler failed", exc_info=context.error)
-        if isinstance(update, Update) and update.effective_message is not None \
-                and update.effective_chat is not None and update.effective_chat.id == self.chat_id:
-            await update.effective_message.reply_text(
-                f"⚠️ {type(context.error).__name__}: {str(context.error)[:300]}")
+        """Logs the details on this machine (token masked) and tells the chat only
+        the kind of error, never its text (paths, hosts, secrets)."""
+        log.error("handler failed: %s", redact_text(repr(context.error), [self.config.token]),
+                  exc_info=context.error)
+        message = getattr(update, "effective_message", None)
+        if message is not None and hasattr(update, "effective_chat") and self.allowed(update):
+            await message.reply_text(
+                f"⚠️ Something went wrong ({type(context.error).__name__}); the details are "
+                "in the bot's log.")
 
 
 def _bound(name: str) -> Handler:
@@ -837,6 +910,5 @@ def run_bot(config: Config | None = None, **options) -> None:
     """Runs the bot until interrupted (long polling)."""
     logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s",
                         level=logging.INFO)
-    logging.getLogger("httpx").setLevel(logging.WARNING)  # its URLs carry the token
-    create_application(config, **options).run_polling(allowed_updates=Update.ALL_TYPES,
+    create_application(config, **options).run_polling(allowed_updates=ALLOWED_UPDATES,
                                                       drop_pending_updates=True)

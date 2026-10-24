@@ -77,7 +77,10 @@ def _config(args, config):
     for field in dataclasses.fields(config):
         value = getattr(config, field.name)
         if field.name == "token" and value:
-            value = "<set>"
+            value = "<set>" if config.token_looks_valid else "<set, but not shaped like a token>"
+        elif field.name == "tracking_uri" and value:
+            from mlflow_telegram.redact import redact_text
+            value = redact_text(value, home=False)      # user:password@host
         print(f"{field.name:14} {value}")
     return 0
 

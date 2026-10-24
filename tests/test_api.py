@@ -89,7 +89,7 @@ def test_cli_config_hides_the_token(capsys, monkeypatch, tmp_path):
     monkeypatch.setenv("MLFLOW_TELEGRAM_TOKEN", "123:secret")
     assert cli.main(["config"]) == 0
     out = capsys.readouterr().out
-    assert "secret" not in out and "<set>" in out
+    assert "123:secret" not in out and "<set" in out
 
 
 def test_cli_build_page(monkeypatch, tmp_path, capsys):

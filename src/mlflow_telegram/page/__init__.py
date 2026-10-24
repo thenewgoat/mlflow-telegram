@@ -21,7 +21,7 @@ import urllib.parse
 import urllib.request
 from importlib import resources
 
-__all__ = ["build_page", "page_html", "echarts_source", "probe_link_limit",
+__all__ = ["build_page", "page_html", "app_js", "echarts_source", "probe_link_limit", "CSP",
            "ECHARTS_VERSION", "ECHARTS_FILE"]
 
 ECHARTS_VERSION = "5.6.0"
@@ -34,14 +34,32 @@ def _asset(name: str) -> str:
     return resources.files("mlflow_telegram.page").joinpath("assets", name).read_text("utf-8")
 
 
+#: The page's Content Security Policy: scripts only from the page's own host and
+#: telegram.org, no inline or eval'd script, no network requests at all
+#: (connect-src 'none'), so even a bug could not send the chart data anywhere.
+CSP = ("default-src 'none'; script-src 'self' https://telegram.org; "
+       "style-src 'unsafe-inline'; img-src data:; connect-src 'none'; font-src 'none'; "
+       "base-uri 'none'; form-action 'none'; frame-src 'none'; object-src 'none'")
+
+
 def page_html() -> str:
-    """The page: chart code, the fragment decoder, Telegram's script, and ECharts
-    loaded from beside it."""
-    libs = ("<script>window.__FRAGMENT = location.hash;</script>\n"
+    """The page. Every script is a file: `boot.js` (saves the fragment before
+    Telegram's script reads it), Telegram's `telegram-web-app.js`, ECharts, and
+    `app.js` (the fragment decoder and the chart)."""
+    head = (f'<meta http-equiv="Content-Security-Policy" content="{CSP}">\n'
+            '<meta name="referrer" content="no-referrer">\n'
+            '<script src="boot.js"></script>\n'
             '<script src="https://telegram.org/js/telegram-web-app.js"></script>\n'
             f'<script src="{ECHARTS_FILE}"></script>')
-    source = f"<script>\n{_asset('fragment.js')}</script>"
-    return _asset("page.html").replace("<!--LIBS-->", libs).replace("<!--SOURCE-->", source)
+    return (_asset("page.html").replace("<!--LIBS-->", head)
+            .replace("<!--SCRIPTS-->", '<script src="app.js"></script>'))
+
+
+def app_js() -> str:
+    return _asset("fragment.js") + "\n" + _asset("chart.js")
+
+
+BOOT_JS = "window.__FRAGMENT = location.hash;\n"
 
 
 def _cache_dir() -> str:
@@ -78,8 +96,8 @@ def build_page(out_dir: str, echarts: str | None = None) -> list[str]:
     if echarts is None:
         raise RuntimeError(f"could not get ECharts {ECHARTS_VERSION} from {ECHARTS_URL}")
     os.makedirs(out_dir, exist_ok=True)
-    files = {"index.html": page_html(), ECHARTS_FILE: echarts, ".nojekyll": "",
-             "robots.txt": "User-agent: *\nDisallow: /\n"}
+    files = {"index.html": page_html(), "boot.js": BOOT_JS, "app.js": app_js(),
+             ECHARTS_FILE: echarts, ".nojekyll": "", "robots.txt": "User-agent: *\nDisallow: /\n"}
     for name, text in files.items():
         with open(os.path.join(out_dir, name), "w", encoding="utf-8") as handle:
             handle.write(text)

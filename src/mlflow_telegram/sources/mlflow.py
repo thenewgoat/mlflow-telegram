@@ -77,14 +77,20 @@ class MlflowSource:
     def get_run(self, run_id: str) -> RunInfo:
         return self._info(self.client.get_run(run_id))
 
-    def find_runs(self, name: str) -> list[RunInfo]:
-        quoted = name.replace("'", "\\'")
-        runs = self._search(f"attributes.run_name = '{quoted}'")
-        if not runs:
-            runs = self._search(f"attributes.run_name LIKE '%{quoted}%'")
-        if not runs and len(name) >= 6 and all(c in "0123456789abcdef" for c in name):
-            runs = [run for run in self._search(limit=1000) if run.id.startswith(name)]
-        return runs
+    def find_runs(self, name: str, limit: int = 2000) -> list[RunInfo]:
+        """Matched here rather than in an MLflow filter string, so no user text is
+        ever parsed as a filter (quotes, % and _ mean nothing special)."""
+        runs = self._search(limit=limit)
+        exact = [run for run in runs if run.name == name]
+        if exact:
+            return exact
+        folded = name.lower()
+        partial = [run for run in runs if folded in run.name.lower()]
+        if partial:
+            return partial
+        if len(name) >= 6 and all(c in "0123456789abcdef" for c in name):
+            return [run for run in runs if run.id.startswith(name)]
+        return []
 
     def metric_history(self, run_id: str, key: str) -> list[Point]:
         points = [Point(m.step, m.value, m.timestamp / 1000.0)

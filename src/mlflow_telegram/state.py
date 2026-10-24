@@ -8,6 +8,7 @@ before a throttled push, so `/mute` and `/every` reach runs already going.
 
 import json
 import os
+import tempfile
 import time
 
 _cache: dict = {}
@@ -41,12 +42,19 @@ def read(path: str | None) -> dict:
 
 
 def write(path: str, value: dict) -> None:
-    """Replaces the state atomically (a reader never sees half a file)."""
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    temporary = f"{path}.{os.getpid()}.tmp"
-    with open(temporary, "w") as handle:
-        json.dump(value, handle, indent=1, sort_keys=True)
-    os.replace(temporary, path)
+    """Replaces the state atomically (a reader never sees half a file), readable
+    by its owner only, through a fresh temporary file (never a followed link)."""
+    folder = os.path.dirname(path) or "."
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    handle, temporary = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=folder)
+    try:
+        with os.fdopen(handle, "w") as stream:      # mkstemp creates it 0600
+            json.dump(value, stream, indent=1, sort_keys=True)
+        os.replace(temporary, path)
+    except BaseException:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+        raise
 
 
 def muted(value: dict, now: float | None = None) -> bool:
